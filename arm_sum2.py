@@ -51,7 +51,8 @@ class RobotArmEnv(gym.Env):
         p.loadURDF("plane.urdf")
         
         # Load Arm (CHECK YOUR PATH!)
-        self.arm_id = p.loadURDF("/Users/laflame/ros2_ws/src/tech_team/so_arm_description/urdf/so101_new_calib.urdf", useFixedBase=True)
+        urdf_path = os.path.join(os.path.dirname(__file__), "so_arm_description", "urdf", "so101_new_calib.urdf")
+        self.arm_id = p.loadURDF(urdf_path, useFixedBase=True)
         
         # Random Trash
         # Make the range smaller so the trash is easier to reach
