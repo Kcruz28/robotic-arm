@@ -1,0 +1,13 @@
+terminal 1
+ros2 run robot_state_publisher robot_state_publisher /Users/laflame/ros2_ws/src/tech_team/so_arm_description/urdf/so101_new_calib.urdf
+
+terminal 2
+cd src/tech_team
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml
+
+terminal 3
+cd src/tech_team
+python3 arm_sim.py
+
+##
+foxglove - go to scene and put it to z-up
