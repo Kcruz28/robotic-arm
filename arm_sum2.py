@@ -11,6 +11,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from tqdm import tqdm
 import time
+import torch
 
 # --- 1. THE PROGRESS BAR (The Visualizer) ---
 class ProgressBarCallback(BaseCallback):
@@ -111,17 +112,31 @@ class RobotArmEnv(gym.Env):
 # --- 3. MAIN EXECUTION ---
 if __name__ == "__main__":
     model_path = "so101_fast_model"
-    training_steps = 200000 # Reduced from 20k to 5k for speed
+    training_steps = 1000000  # reduced for speed
+
+    print(torch.version.cuda)   
+    print("CUDA available:", torch.cuda.is_available())
+    print("CUDA device count:", torch.cuda.device_count())
+    print("Current device:", torch.cuda.current_device())
+    print("Device name:", torch.cuda.get_device_name(torch.cuda.current_device()))
+
+    # --- GPU / Device Setup ---
+    import torch
+    if torch.backends.mps.is_available():
+        device = "mps"  # Apple M1/M2
+    elif torch.cuda.is_available():
+        device = "cuda"  # NVIDIA GPU
+    else:
+        device = "cpu"
+    print(f"Using device: {device}")
 
     # --- PART A: TRAINING ---
-    # If the model doesn't exist, we train it.
     if not os.path.exists(model_path + ".zip"):
         print(f"STARTING FAST TRAINING ({training_steps} steps)...")
         
         env = RobotArmEnv(render_mode=False)
-        model = PPO("MlpPolicy", env, verbose=0) # verbose=0 to hide spam, we use tqdm instead
+        model = PPO("MlpPolicy", env, verbose=0, device=device)  # Pass device
         
-        # Run Training with Progress Bar
         callback = ProgressBarCallback(training_steps)
         model.learn(total_timesteps=training_steps, callback=callback)
         
@@ -133,8 +148,8 @@ if __name__ == "__main__":
 
     # --- PART B: WATCH IT WORK ---
     print("LAUNCHING GUI...")
-    env = RobotArmEnv(render_mode=True) # Turn GUI ON
-    model = PPO.load(model_path)
+    env = RobotArmEnv(render_mode=True)
+    model = PPO.load(model_path, device=device)  # Pass device
     
     obs, _ = env.reset()
     while True:
