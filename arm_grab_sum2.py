@@ -120,34 +120,53 @@ class RobotArmEnv(gym.Env):
         dist = np.linalg.norm(np.array(gripper_pos) - np.array(trash_pos))
         
         # 1. Approach Reward (encourage getting close)
-        # Shift the target point slightly LOWER mathematically so it pushes its claw *over* and *down* past the block
+        # Aim for the TOP of the block (trash_z + small offset) so it hovers correctly
         target_pos = np.array(trash_pos)
-        target_pos[2] -= 0.02 # Aim 2cm below the center of the block!
+        target_pos[2] += 0.01 
         
         real_dist = np.linalg.norm(np.array(gripper_pos) - target_pos)
-        reward = -real_dist * 2.0 
+        reward = -real_dist * 5.0 
         
         # 1.5 The "Crane" Approach (Hover above, then drop)
         xy_dist = np.linalg.norm(np.array(gripper_pos[:2]) - np.array(trash_pos[:2]))
         
-        # Prevent "sweeping": If it's too far horizontally (> 0.05m), FORCE it to stay high in the air!
-        if xy_dist > 0.05:
-            if gripper_pos[2] < 0.12: # If it drops the claw while far away
-                reward -= 5.0 # penalty for flying low and sweeping the block away!
+        # Prevent "sweeping": If it's too far horizontally (> 0.04m), FORCE it to stay high!
+        if xy_dist > 0.04:
+            if gripper_pos[2] < 0.10: 
+                reward -= 10.0 
         else:
-            # Once it's hovering directly above (within 5cm), explicitly reward dropping down
-            reward += (0.15 - gripper_pos[2]) * 10.0 
+            # Once hovering, reward being at the ideal grasp height (approx 0.04m)
+            # This prevents it from trying to drive the gripper into the table.
+            grasp_height_reward = max(0, 0.1 - abs(gripper_pos[2] - 0.04))
+            reward += grasp_height_reward * 10.0
                
-        # 2. Smoothness Penalty (Stop the robot from violently flailing)
+        # 1.8 REALISTIC GRASP REWARD
+        # Reward the 'Sandwich': Contact on BOTH stationary gripper (link 4) AND moving jaw (link 5)
+        contact_stationary = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id, linkIndexA=4, physicsClientId=self.client)
+        contact_moving = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id, linkIndexA=5, physicsClientId=self.client)
+        
+        if len(contact_stationary) > 0 and len(contact_moving) > 0:
+            reward += 50.0 # JACKPOT: The block is secured between jaws!
+        elif len(contact_stationary) > 0 or len(contact_moving) > 0:
+            reward += 10.0 # Just touching it
+            
+        # 1.9 ANTI-CRUSH PENALTY
+        # If the shoulder, elbow, or wrist (links 0-3) hits the block, punish it.
+        # This teaches the robot to ONLY use its 'fingers' to interact with the block.
+        for link_idx in range(4): 
+            bad_contact = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id, linkIndexA=link_idx, physicsClientId=self.client)
+            if len(bad_contact) > 0:
+                reward -= 10.0 
+
+        # 2. Smoothness Penalty
         motor_effort = np.sum(np.square(action))
-        # REDUCED FROM 0.01 to 0.001! The old penalty was making the robot terrified to use its joints!
         reward -= motor_effort * 0.001 
 
-        # 3. Lift Reward (encourage picking it up)
-        trash_z = trash_pos[2] # Z-coordinate is the height
-        if trash_z > 0.025: # Base height is around 0.02
-            # The higher it goes, the more points it gets!
-            reward += (trash_z - 0.02) * 200 
+        # 3. Lift Reward (The "Jackpot" path)
+        trash_z = trash_pos[2]
+        if trash_z > 0.03: # Block starts at ~0.02
+            # Very high reward for every centimeter of lift
+            reward += (trash_z - 0.02) * 1000 
             
         terminated = False
         # 3. Ultimate Goal: Lift the block more than 10cm!
