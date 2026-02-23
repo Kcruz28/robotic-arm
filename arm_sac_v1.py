@@ -18,14 +18,23 @@ import time
 class ProgressBarCallback(BaseCallback):
     def __init__(self, total_timesteps):
         super().__init__()
-        self.pbar = tqdm(total=total_timesteps, desc="Training SAC")
+        self._total = total_timesteps
+        self.pbar = None
+        self._last_steps = 0
+
+    def _on_training_start(self):
+        self.pbar = tqdm(total=self._total, desc="Training SAC")
+        self._last_steps = self.model.num_timesteps
 
     def _on_step(self) -> bool:
-        self.pbar.update(1)
+        increment = self.model.num_timesteps - self._last_steps
+        self.pbar.update(increment)
+        self._last_steps = self.model.num_timesteps
         return True
 
     def _on_training_end(self) -> None:
-        self.pbar.close()
+        if self.pbar:
+            self.pbar.close()
 
 
 # --- 2. ROBOT ARM ENVIRONMENT ---
@@ -355,9 +364,10 @@ if __name__ == "__main__":
     #  batch_size auto-scales with --envs so the GPU stays saturated.    #
     # ------------------------------------------------------------------ #
     n_envs = getattr(args, "envs", 1)  # watch mode has no --envs flag
-    # Base batch size 512. Scale up with parallel envs so the 5090 stays
-    # busy, but cap at 4096 to avoid excessive memory usage.
-    scaled_batch = min(512 * max(n_envs, 1), 4096)
+    # SAC trains 'n_envs' times every step when gradient_steps=-1. 
+    # High batch sizes compute too many gradients at once, causing massive slowdowns.
+    # Keep it stable at 512 across any number of parallel envs.
+    scaled_batch = 512
     # learning_starts also scales: wait for ~10k steps worth of real data
     # regardless of how many envs are collecting simultaneously.
     scaled_learning_starts = max(10_000, 1_000 * n_envs)
@@ -406,7 +416,7 @@ if __name__ == "__main__":
         print(f"  Device       : {DEVICE.upper()}  ◄ THIS IS WHERE YOUR MODEL TRAINS")
         print(f"  Steps        : {training_steps:,}")
         print(f"  Parallel envs: {n_envs}")
-        print(f"  Batch size   : {scaled_batch}  (auto-scaled)")
+        print(f"  Batch size   : {scaled_batch}")
         print(f"  Network      : [512, 512, 256]")
         print(f"{'='*55}\n")
 
