@@ -80,6 +80,12 @@ class RobotArmEnv(gym.Env):
             # Fallback if there's a weird Pybullet visual shape error during fast resets
             pass
 
+        # START WITH JAWS OPEN: Give the AI a head start by opening the gripper (Joint 5)
+        try:
+            p.resetJointState(self.arm_id, 5, targetValue=0.5) 
+        except p.error:
+            pass
+
         self.step_counter = 0
         return self._get_obs(), {}
 
@@ -147,9 +153,19 @@ class RobotArmEnv(gym.Env):
         
         if len(contact_stationary) > 0 and len(contact_moving) > 0:
             reward += 50.0 # JACKPOT: The block is secured between jaws!
-        elif len(contact_stationary) > 0 or len(contact_moving) > 0:
-            reward += 10.0 # Just touching it
             
+        # ENCOURAGE OPEN JAWS WHEN FAR AWAY
+        # Assuming joint 5 is the moving jaw. Positive = Open.
+        gripper_joint = current_joints[5]
+        if dist > 0.05:
+            # Reward it slightly for keeping the jaw open while it approaches
+            reward += gripper_joint * 5.0
+            
+        # PUNISH "HAMMERING" DOWON
+        # If the gripper is extremely low but NOT holding the block, it's just squishing it
+        if gripper_pos[2] < 0.03 and not (len(contact_stationary) > 0 and len(contact_moving) > 0):
+            reward -= 5.0 # Stop hammering!
+
         # 1.9 ANTI-CRUSH PENALTY
         # If the shoulder, elbow, or wrist (links 0-3) hits the block, punish it.
         # This teaches the robot to ONLY use its 'fingers' to interact with the block.
@@ -224,35 +240,61 @@ class RobotArmEnv(gym.Env):
 if __name__ == "__main__":
     # Use absolute path so it finds the file no matter what folder you run it from!
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(script_dir, "so101_grab_crane_v4") 
     
-    # 400k is great for learning to reach! Let's bump it up slightly more to let it master the grab!
-    training_steps = 600000 
+    # 1. THE MODEL WE WANT TO LOAD
+    base_model_path = os.path.join(script_dir, "so101_grab_crane_v4") 
+    
+    # 2. THE NEW MODEL WE WANT TO SAVE TO
+    new_model_path = os.path.join(script_dir, "so101_grab_crane_v4.1")
+    
+    # Train for another 1 million steps!
+    training_steps = 1000000 
 
     # --- PART A: TRAINING ---
-    # If the model doesn't exist, we train it.
-    if not os.path.exists(model_path + ".zip"):
-        print(f"STARTING FAST TRAINING ({training_steps} steps)...")
-        
+    if os.path.exists(base_model_path + ".zip"):
+        print(f"FOUND EXISTING MODEL! Continuing training for {training_steps} more steps...")
         env = RobotArmEnv(render_mode=False)
-        # `device="cpu"` is CRITICAL here! It stops the GPU/CUDA warning and makes it much faster for smaller models.
-        # BIGGER BRAIN: We added `policy_kwargs=dict(net_arch=[256, 256])` so it has way more neurons to solve this hard physics puzzle!
+        
+        # Load the existing brain to continue training
+        model = PPO.load(base_model_path, env=env, device="cpu")
+        
+        # Continue learning
+        callback = ProgressBarCallback(training_steps)
+        model.learn(total_timesteps=training_steps, callback=callback, reset_num_timesteps=False)
+        
+        # Save as the NEW VERSION so we don't accidentally overwrite the base model
+        model.save(new_model_path)
+        print(f"\nFINISHED EXTRA TRAINING! Brain saved as {new_model_path}.zip")
+        env.close()
+    else:
+        print(f"NO BASE MODEL FOUND! Starting fresh training ({training_steps} steps)...")
+        env = RobotArmEnv(render_mode=False)
+        
+        # Create a new brain
         model = PPO("MlpPolicy", env, verbose=0, tensorboard_log="./ppo_tensorboard/", device="cpu", policy_kwargs=dict(net_arch=[256, 256])) 
         
         # Run Training with Progress Bar
         callback = ProgressBarCallback(training_steps)
         model.learn(total_timesteps=training_steps, callback=callback)
         
-        model.save(model_path)
+        model.save(new_model_path)
+        print(f"\nTRAINING DONE! Saving Brain as {new_model_path}.zip")
+        env.close()
         print("\nTRAINING DONE! Saving Brain...")
         env.close()
-    else:
-        print("MODEL FOUND! Skipping training.")
 
     # --- PART B: WATCH IT WORK ---
     print("LAUNCHING GUI...")
     env = RobotArmEnv(render_mode=True) # Turn GUI ON
-    model = PPO.load(model_path)
+    
+    # Prioritize loading the newly trained model to watch it! 
+    # If the new one isn't there, fall back to the base model.
+    if os.path.exists(new_model_path + ".zip"):
+        print("Watching the newly trained model (v4.1)!")
+        model = PPO.load(new_model_path)
+    else:
+        print("Watching the base model (v4)!")
+        model = PPO.load(base_model_path)
     
     obs, _ = env.reset()
     while True:
