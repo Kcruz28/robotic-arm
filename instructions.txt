@@ -15,3 +15,6 @@ python arm_sac_v1.py --help
 python arm_sac_v1.py train --help
 python arm_sac_v1.py watch --helppython arm_sac_v1.py train --model so101_SAC_v1 --save so101_SAC_v2
 
+
+On the 5090 machine, run:
+python arm_sac_v1.py train --save so101_SAC_v1 --steps 1000000 --envs 8

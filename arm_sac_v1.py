@@ -10,22 +10,35 @@ import pybullet_data
 import numpy as np
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from tqdm import tqdm
 import time
 
 # --- GPU DETECTION ---
 # Priority: CUDA (A40 / RTX 5090) > Apple MPS (M1/M2/M3/M4) > CPU
+print("Checking for available GPUs...")
 if torch.cuda.is_available():
     DEVICE = "cuda"
-    print(f"[GPU] CUDA detected: {torch.cuda.get_device_name(0)}")
-    print(f"      VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    gpu_name = torch.cuda.get_device_name(0)
+    vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+    print(f"✓ CUDA GPU DETECTED: {gpu_name}")
+    print(f"  VRAM: {vram_gb:.1f} GB")
+    print(f"  CUDA Version: {torch.version.cuda}")
 elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
     DEVICE = "mps"
-    print("[GPU] Apple MPS detected (M1/M2/M3/M4). Using Metal GPU acceleration.")
-    print("      Note: if you see any MPS tensor errors, set DEVICE = 'cpu' manually.")
+    print("✓ Apple MPS GPU DETECTED (M1/M2/M3/M4)")
+    print("  Using Metal GPU acceleration.")
+    print("  Note: if you see MPS tensor errors, set DEVICE='cpu' manually.")
 else:
     DEVICE = "cpu"
-    print("[CPU] No GPU detected. Training on CPU.")
+    print("✗ No GPU detected. Training on CPU.")
+    print("\n  To enable CUDA (RTX 5090):")
+    print("  1. Check NVIDIA drivers:  nvidia-smi")
+    print("  2. If nvidia-smi fails, install NVIDIA drivers")
+    print("  3. Reinstall PyTorch with CUDA:")
+    print("     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124")
+    print("  4. Verify torch.cuda.is_available() = True in Python")
+    print()
 
 # --- 1. PROGRESS BAR CALLBACK ---
 class ProgressBarCallback(BaseCallback):
@@ -241,18 +254,30 @@ class RobotArmEnv(gym.Env):
             pass
 
 
-# --- 3. MAIN ---
+def make_env():
+    """
+    Factory for SubprocVecEnv. Must be a module-level function so each
+    subprocess can pickle and call it independently.
+    """
+    def _init():
+        return RobotArmEnv(render_mode=False)
+    return _init
+
+
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
     # ------------------------------------------------------------------ #
     #  CLI — how to use:                                                   #
     #                                                                      #
-    #  Fresh training from scratch:                                        #
+    #  Fresh training from scratch (single env):                          #
     #    python arm_sac_v1.py train --save so101_SAC_v1                   #
     #                                                                      #
+    #  Fast training on RTX 5090 with 8 parallel envs:                   #
+    #    python arm_sac_v1.py train --save so101_SAC_v1 --envs 8          #
+    #                                                                      #
     #  Continue training an existing model:                                #
-    #    python arm_sac_v1.py train --model so101_SAC_v1 --save so101_SAC_v2
+    #    python arm_sac_v1.py train --model so101_SAC_v1 --save so101_SAC_v2 --envs 8
     #                                                                      #
     #  Override number of steps:                                           #
     #    python arm_sac_v1.py train --save so101_SAC_v1 --steps 5000000   #
@@ -296,6 +321,19 @@ if __name__ == "__main__":
         metavar="N",
         help="Number of training timesteps (default: 2,000,000).",
     )
+    train_parser.add_argument(
+        "--envs",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Number of parallel PyBullet environments (default: 1).\n"
+            "More envs = faster data collection = GPU stays fed.\n"
+            "Recommended for RTX 5090: --envs 8\n"
+            "Each env runs in its own CPU process (SubprocVecEnv).\n"
+            "Example: --envs 8"
+        ),
+    )
 
     # --- watch subcommand ---
     watch_parser = subparsers.add_parser("watch", help="Watch a saved model in the GUI.")
@@ -314,20 +352,28 @@ if __name__ == "__main__":
 
     # ------------------------------------------------------------------ #
     #  SAC HYPERPARAMETERS (used only when training from scratch)         #
+    #  batch_size auto-scales with --envs so the GPU stays saturated.    #
     # ------------------------------------------------------------------ #
+    n_envs = getattr(args, "envs", 1)  # watch mode has no --envs flag
+    # Base batch size 512. Scale up with parallel envs so the 5090 stays
+    # busy, but cap at 4096 to avoid excessive memory usage.
+    scaled_batch = min(512 * max(n_envs, 1), 4096)
+    # learning_starts also scales: wait for ~10k steps worth of real data
+    # regardless of how many envs are collecting simultaneously.
+    scaled_learning_starts = max(10_000, 1_000 * n_envs)
     sac_kwargs = dict(
         policy="MlpPolicy",
         verbose=0,
         device=DEVICE,
         tensorboard_log="./sac_tensorboard/",
-        buffer_size=500_000,
-        learning_starts=10_000,
+        buffer_size=1_000_000,          # doubled — parallel envs fill the buffer fast
+        learning_starts=scaled_learning_starts,
         learning_rate=3e-4,
         gamma=0.99,
         tau=0.005,
-        batch_size=512,
+        batch_size=scaled_batch,        # auto-scaled to keep GPU fed
         train_freq=1,
-        gradient_steps=-1,
+        gradient_steps=-1,              # -1 = do n_envs gradient steps per round
         use_sde=True,
         sde_sample_freq=64,
         policy_kwargs=dict(net_arch=[512, 512, 256]),
@@ -339,16 +385,30 @@ if __name__ == "__main__":
     if args.mode == "train":
         save_path = os.path.join(script_dir, args.save)
         training_steps = args.steps
+        n_envs = args.envs
+
+        # ---- Build the environment (parallel or single) ----
+        if n_envs > 1:
+            # SubprocVecEnv: each env runs in its own OS process.
+            # This bypasses Python's GIL and gives true CPU parallelism.
+            # Each process gets its own PyBullet physics client (p.DIRECT).
+            # "fork" is fastest on Linux; Windows requires "spawn".
+            import platform
+            start_method = "fork" if platform.system() != "Windows" else "spawn"
+            env = SubprocVecEnv([make_env() for _ in range(n_envs)],
+                                start_method=start_method)
+        else:
+            env = DummyVecEnv([make_env()])             # single env, no overhead
 
         print(f"\n{'='*55}")
         print(f"  Mode         : TRAIN")
         print(f"  RL Algorithm : SAC + gSDE")
-        print(f"  Device       : {DEVICE.upper()}")
+        print(f"  Device       : {DEVICE.upper()}  ◄ THIS IS WHERE YOUR MODEL TRAINS")
         print(f"  Steps        : {training_steps:,}")
+        print(f"  Parallel envs: {n_envs}")
+        print(f"  Batch size   : {scaled_batch}  (auto-scaled)")
         print(f"  Network      : [512, 512, 256]")
-        print(f"  Batch size   : {sac_kwargs['batch_size']}")
-
-        env = RobotArmEnv(render_mode=False)
+        print(f"{'='*55}\n")
 
         if args.model is not None:
             # ------ CONTINUE training from existing model ------
@@ -362,6 +422,8 @@ if __name__ == "__main__":
             print(f"  Save to      : {args.save}.zip")
             print(f"{'='*55}\n")
             model = SAC.load(load_path, env=env, device=DEVICE)
+            # Re-apply scaled batch size in case it differs from saved model
+            model.batch_size = scaled_batch
             fresh = False
         else:
             # ------ FRESH training from scratch ------
