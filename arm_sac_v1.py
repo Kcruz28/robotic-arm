@@ -14,32 +14,6 @@ from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from tqdm import tqdm
 import time
 
-# --- GPU DETECTION ---
-# Priority: CUDA (A40 / RTX 5090) > Apple MPS (M1/M2/M3/M4) > CPU
-print("Checking for available GPUs...")
-if torch.cuda.is_available():
-    DEVICE = "cuda"
-    gpu_name = torch.cuda.get_device_name(0)
-    vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-    print(f"✓ CUDA GPU DETECTED: {gpu_name}")
-    print(f"  VRAM: {vram_gb:.1f} GB")
-    print(f"  CUDA Version: {torch.version.cuda}")
-elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
-    DEVICE = "mps"
-    print("✓ Apple MPS GPU DETECTED (M1/M2/M3/M4)")
-    print("  Using Metal GPU acceleration.")
-    print("  Note: if you see MPS tensor errors, set DEVICE='cpu' manually.")
-else:
-    DEVICE = "cpu"
-    print("✗ No GPU detected. Training on CPU.")
-    print("\n  To enable CUDA (RTX 5090):")
-    print("  1. Check NVIDIA drivers:  nvidia-smi")
-    print("  2. If nvidia-smi fails, install NVIDIA drivers")
-    print("  3. Reinstall PyTorch with CUDA:")
-    print("     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124")
-    print("  4. Verify torch.cuda.is_available() = True in Python")
-    print()
-
 # --- 1. PROGRESS BAR CALLBACK ---
 class ProgressBarCallback(BaseCallback):
     def __init__(self, total_timesteps):
@@ -267,6 +241,32 @@ def make_env():
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
+    # --- GPU DETECTION ---
+    # Priority: CUDA (A40 / RTX 5090) > Apple MPS (M1/M2/M3/M4) > CPU
+    print("Checking for available GPUs...")
+    if torch.cuda.is_available():
+        DEVICE = "cuda"
+        gpu_name = torch.cuda.get_device_name(0)
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+        print(f"✓ CUDA GPU DETECTED: {gpu_name}")
+        print(f"  VRAM: {vram_gb:.1f} GB")
+        print(f"  CUDA Version: {torch.version.cuda}")
+    elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        DEVICE = "mps"
+        print("✓ Apple MPS GPU DETECTED (M1/M2/M3/M4)")
+        print("  Using Metal GPU acceleration.")
+        print("  Note: if you see MPS tensor errors, set DEVICE='cpu' manually.")
+    else:
+        DEVICE = "cpu"
+        print("✗ No GPU detected. Training on CPU.")
+        print("\n  To enable CUDA (RTX 5090):")
+        print("  1. Check NVIDIA drivers:  nvidia-smi")
+        print("  2. If nvidia-smi fails, install NVIDIA drivers")
+        print("  3. Reinstall PyTorch with CUDA:")
+        print("     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124")
+        print("  4. Verify torch.cuda.is_available() = True in Python")
+        print()
+
     # ------------------------------------------------------------------ #
     #  CLI — how to use:                                                   #
     #                                                                      #
@@ -421,7 +421,12 @@ if __name__ == "__main__":
             print(f"  Source model : {args.model}.zip  (continuing)")
             print(f"  Save to      : {args.save}.zip")
             print(f"{'='*55}\n")
-            model = SAC.load(load_path, env=env, device=DEVICE)
+            custom_objects = {
+                "learning_rate": 3e-4,
+                "lr_schedule": lambda _: 3e-4,
+                "clip_range": lambda _: 0.2,
+            }
+            model = SAC.load(load_path, env=env, device=DEVICE, custom_objects=custom_objects)
             # Re-apply scaled batch size in case it differs from saved model
             model.batch_size = scaled_batch
             fresh = False
@@ -462,7 +467,12 @@ if __name__ == "__main__":
         print(f"{'='*55}\n")
 
         env = RobotArmEnv(render_mode=True)
-        model = SAC.load(load_path, env=env, device=DEVICE)
+        custom_objects = {
+            "learning_rate": 3e-4,
+            "lr_schedule": lambda _: 3e-4,
+            "clip_range": lambda _: 0.2,
+        }
+        model = SAC.load(load_path, env=env, device=DEVICE, custom_objects=custom_objects)
 
         print("Watching... close the PyBullet window to exit.")
         obs, _ = env.reset()
