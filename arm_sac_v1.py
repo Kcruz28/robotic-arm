@@ -1,4 +1,5 @@
 import os
+import argparse
 import torch
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'  # Safe on all platforms
 
@@ -151,9 +152,9 @@ class RobotArmEnv(gym.Env):
 
         # --- Reward 3: Grasp (both jaw faces must contact block) ---
         contact_stationary = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id,
-                                                linkIndexA=4, physicsClientId=self.client)
+                                                linkIndexA=4, physicsClientId=self.client) or ()
         contact_moving = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id,
-                                            linkIndexA=5, physicsClientId=self.client)
+                                            linkIndexA=5, physicsClientId=self.client) or ()
         gripped = len(contact_stationary) > 0 and len(contact_moving) > 0
 
         if gripped:
@@ -172,7 +173,7 @@ class RobotArmEnv(gym.Env):
         # --- Penalty 2: Arm body hitting block (only fingers should touch) ---
         for link_idx in range(4):
             bad_contact = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id,
-                                             linkIndexA=link_idx, physicsClientId=self.client)
+                                             linkIndexA=link_idx, physicsClientId=self.client) or ()
             if len(bad_contact) > 0:
                 reward -= 10.0
 
@@ -244,113 +245,175 @@ class RobotArmEnv(gym.Env):
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    base_model_path = os.path.join(script_dir, "so101_SAC_v0")
-    new_model_path  = os.path.join(script_dir, "so101_SAC_v1")
+    # ------------------------------------------------------------------ #
+    #  CLI — how to use:                                                   #
+    #                                                                      #
+    #  Fresh training from scratch:                                        #
+    #    python arm_sac_v1.py train --save so101_SAC_v1                   #
+    #                                                                      #
+    #  Continue training an existing model:                                #
+    #    python arm_sac_v1.py train --model so101_SAC_v1 --save so101_SAC_v2
+    #                                                                      #
+    #  Override number of steps:                                           #
+    #    python arm_sac_v1.py train --save so101_SAC_v1 --steps 5000000   #
+    #                                                                      #
+    #  Watch a saved model in the GUI:                                     #
+    #    python arm_sac_v1.py watch --model so101_SAC_v1                  #
+    # ------------------------------------------------------------------ #
+    parser = argparse.ArgumentParser(
+        description="SO-101 Arm — SAC Training & Evaluation",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="mode", required=True)
 
-    # SAC is ~3x more sample-efficient than PPO for continuous robotic control.
-    # 2M steps on an A40/5090 beats 4M PPO steps on CPU in both wall-clock time
-    # and final policy quality.
+    # --- train subcommand ---
+    train_parser = subparsers.add_parser("train", help="Train a SAC model.")
+    train_parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        metavar="MODEL_NAME",
+        help=(
+            "Name of an existing model to CONTINUE training from.\n"
+            "Omit this flag to start a FRESH training run.\n"
+            "Example: --model so101_SAC_v1"
+        ),
+    )
+    train_parser.add_argument(
+        "--save",
+        type=str,
+        required=True,
+        metavar="SAVE_NAME",
+        help=(
+            "Name to save the trained model as (no .zip needed).\n"
+            "Example: --save so101_SAC_v2"
+        ),
+    )
+    train_parser.add_argument(
+        "--steps",
+        type=int,
+        default=2_000_000,
+        metavar="N",
+        help="Number of training timesteps (default: 2,000,000).",
+    )
+
+    # --- watch subcommand ---
+    watch_parser = subparsers.add_parser("watch", help="Watch a saved model in the GUI.")
+    watch_parser.add_argument(
+        "--model",
+        type=str,
+        required=True,
+        metavar="MODEL_NAME",
+        help=(
+            "Name of the model to watch (no .zip needed).\n"
+            "Example: --model so101_SAC_v1"
+        ),
+    )
+
+    args = parser.parse_args()
 
     # ------------------------------------------------------------------ #
-    # Training Steps                                                     #
-    # ------------------------------------------------------------------ #
-    training_steps = 10_000
-
-    # ------------------------------------------------------------------ #
-    #  SAC HYPERPARAMETERS                                               #
+    #  SAC HYPERPARAMETERS (used only when training from scratch)         #
     # ------------------------------------------------------------------ #
     sac_kwargs = dict(
         policy="MlpPolicy",
         verbose=0,
         device=DEVICE,
         tensorboard_log="./sac_tensorboard/",
-        # Off-policy replay buffer — SAC reuses every collected transition
-        # multiple times, which is why it's so much more efficient than PPO.
         buffer_size=500_000,
-        # Collect 10k random steps before training so the replay buffer
-        # is populated with diverse transitions before gradient updates begin.
         learning_starts=10_000,
         learning_rate=3e-4,
         gamma=0.99,
         tau=0.005,
-        # batch_size=512 saturates A40/5090 CUDA cores efficiently
         batch_size=512,
         train_freq=1,
-        gradient_steps=-1,  # match gradient steps to env steps collected
-        # gSDE (generalized State Dependent Exploration):
-        # Learns a state-conditional noise distribution per joint instead of
-        # applying the same fixed Gaussian noise to every action.
-        # Significantly improves arm manipulation performance over vanilla SAC.
+        gradient_steps=-1,
         use_sde=True,
         sde_sample_freq=64,
-        # [512, 512, 256]: deeper tapering network for 20-dim obs → 6-dim action
         policy_kwargs=dict(net_arch=[512, 512, 256]),
     )
 
-    # ------------------------------------------------------------------ #
-    #  PART A: TRAINING                                                    #
-    # ------------------------------------------------------------------ #
-    print(f"\n{'='*55}")
-    print(f"  RL Algorithm : SAC (Soft Actor-Critic) + gSDE")
-    print(f"  Device       : {DEVICE.upper()}")
-    print(f"  Steps        : {training_steps:,}")
-    print(f"  Network      : [512, 512, 256]")
-    print(f"  Batch size   : {sac_kwargs['batch_size']}")
-    print(f"{'='*55}\n")
+    # ================================================================== #
+    #  TRAIN MODE                                                          #
+    # ================================================================== #
+    if args.mode == "train":
+        save_path = os.path.join(script_dir, args.save)
+        training_steps = args.steps
 
-    env = RobotArmEnv(render_mode=False)
+        print(f"\n{'='*55}")
+        print(f"  Mode         : TRAIN")
+        print(f"  RL Algorithm : SAC + gSDE")
+        print(f"  Device       : {DEVICE.upper()}")
+        print(f"  Steps        : {training_steps:,}")
+        print(f"  Network      : [512, 512, 256]")
+        print(f"  Batch size   : {sac_kwargs['batch_size']}")
 
-    if os.path.exists(base_model_path + ".zip"):
-        print(f"FOUND EXISTING SAC MODEL: '{base_model_path}.zip'")
-        print(f"Continuing training for {training_steps:,} more steps...")
-        model = SAC.load(base_model_path, env=env, device=DEVICE)
-    else:
-        print(f"No existing SAC model found. Starting fresh ({training_steps:,} steps)...")
-        model = SAC(env=env, **sac_kwargs)
+        env = RobotArmEnv(render_mode=False)
 
-    callback = ProgressBarCallback(training_steps)
-    model.learn(
-        total_timesteps=training_steps,
-        callback=callback,
-        reset_num_timesteps=False,  # keeps TensorBoard x-axis continuous across runs
-        log_interval=1,
-    )
+        if args.model is not None:
+            # ------ CONTINUE training from existing model ------
+            load_path = os.path.join(script_dir, args.model)
+            if not os.path.exists(load_path + ".zip"):
+                print(f"\nERROR: Model '{load_path}.zip' not found.")
+                print("       Check available models with: ls *.zip")
+                env.close()
+                exit(1)
+            print(f"  Source model : {args.model}.zip  (continuing)")
+            print(f"  Save to      : {args.save}.zip")
+            print(f"{'='*55}\n")
+            model = SAC.load(load_path, env=env, device=DEVICE)
+            fresh = False
+        else:
+            # ------ FRESH training from scratch ------
+            print(f"  Source model : (none — fresh start)")
+            print(f"  Save to      : {args.save}.zip")
+            print(f"{'='*55}\n")
+            model = SAC(env=env, **sac_kwargs)
+            fresh = True
 
-    model.save(new_model_path)
-    print(f"\nTRAINING DONE! Model saved to '{new_model_path}.zip'")
-    env.close()
+        callback = ProgressBarCallback(training_steps)
+        model.learn(
+            total_timesteps=training_steps,
+            callback=callback,
+            reset_num_timesteps=fresh,  # reset step counter only on fresh runs
+            log_interval=1,
+        )
 
-    # ------------------------------------------------------------------ #
-    #  PART B: WATCH IT WORK (GUI)                                         #
-    # ------------------------------------------------------------------ #
-    print("\nLAUNCHING GUI to watch the trained model...")
-    env = RobotArmEnv(render_mode=True)
-
-    if os.path.exists(new_model_path + ".zip"):
-        print(f"Loading: {new_model_path}")
-        model = SAC.load(new_model_path, env=env, device=DEVICE)
-    elif os.path.exists(base_model_path + ".zip"):
-        print(f"Falling back to base model: {base_model_path}")
-        model = SAC.load(base_model_path, env=env, device=DEVICE)
-    else:
-        print("ERROR: No SAC model file found. Run training first.")
+        model.save(save_path)
+        print(f"\nTRAINING DONE! Model saved to '{save_path}.zip'")
         env.close()
-        exit(1)
 
-    print("Watching... close the PyBullet window to exit.")
-    obs, _ = env.reset()
-    episode = 0
-    while True:
-        # deterministic=True: policy mean — no exploration noise during eval
-        action, _ = model.predict(obs, deterministic=True)
-        obs, reward, done, truncated, _ = env.step(action)
+    # ================================================================== #
+    #  WATCH MODE                                                          #
+    # ================================================================== #
+    elif args.mode == "watch":
+        load_path = os.path.join(script_dir, args.model)
+        if not os.path.exists(load_path + ".zip"):
+            print(f"ERROR: Model '{load_path}.zip' not found.")
+            print("       Check available models with: ls *.zip")
+            exit(1)
 
-        # FIX: combined into one block — was two separate if blocks causing double-reset
-        if done or truncated:
-            episode += 1
-            if done:
-                print(f"[Episode {episode}] SUCCESS! Block lifted! Resetting...")
-                time.sleep(1.5)
-            else:
-                print(f"[Episode {episode}] Time limit. Resetting...")
-            obs, _ = env.reset()
+        print(f"\n{'='*55}")
+        print(f"  Mode   : WATCH")
+        print(f"  Model  : {args.model}.zip")
+        print(f"  Device : {DEVICE.upper()}")
+        print(f"{'='*55}\n")
+
+        env = RobotArmEnv(render_mode=True)
+        model = SAC.load(load_path, env=env, device=DEVICE)
+
+        print("Watching... close the PyBullet window to exit.")
+        obs, _ = env.reset()
+        episode = 0
+        while True:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, done, truncated, _ = env.step(action)
+
+            if done or truncated:
+                episode += 1
+                if done:
+                    print(f"[Episode {episode}] SUCCESS! Block lifted! Resetting...")
+                    time.sleep(1.5)
+                else:
+                    print(f"[Episode {episode}] Time limit. Resetting...")
+                obs, _ = env.reset()

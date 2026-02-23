@@ -1,0 +1,17 @@
+Fresh training from scratch:
+python arm_sac_v1.py train --save so101_SAC_v1
+
+Continue training an existing model:
+python arm_sac_v1.py train --model so101_SAC_v1 --save so101_SAC_v2
+
+Override steps (e.g. 5 million):
+python arm_sac_v1.py train --save so101_SAC_v1 --steps 5000000
+
+Watch a saved model:
+python arm_sac_v1.py watch --model so101_SAC_v1
+
+See all options:
+python arm_sac_v1.py --help
+python arm_sac_v1.py train --help
+python arm_sac_v1.py watch --helppython arm_sac_v1.py train --model so101_SAC_v1 --save so101_SAC_v2
+
