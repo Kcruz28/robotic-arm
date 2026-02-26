@@ -367,7 +367,7 @@ if __name__ == "__main__":
     # SAC trains 'n_envs' times every step when gradient_steps=-1. 
     # High batch sizes compute too many gradients at once, causing massive slowdowns.
     # Keep it stable at 512 across any number of parallel envs.
-    scaled_batch = 512
+    scaled_batch = 4096
     # learning_starts also scales: wait for ~10k steps worth of real data
     # regardless of how many envs are collecting simultaneously.
     scaled_learning_starts = max(10_000, 1_000 * n_envs)
@@ -383,7 +383,7 @@ if __name__ == "__main__":
         tau=0.005,
         batch_size=scaled_batch,        # auto-scaled to keep GPU fed
         train_freq=1,
-        gradient_steps=-1,              # -1 = do n_envs gradient steps per round
+        gradient_steps=-4,              # -1 = do n_envs gradient steps per round
         use_sde=True,
         sde_sample_freq=64,
         policy_kwargs=dict(net_arch=[512, 512, 256]),
@@ -439,6 +439,7 @@ if __name__ == "__main__":
             model = SAC.load(load_path, env=env, device=DEVICE, custom_objects=custom_objects)
             # Re-apply scaled batch size in case it differs from saved model
             model.batch_size = scaled_batch
+            model.gradient_steps = 4
             fresh = False
         else:
             # ------ FRESH training from scratch ------
