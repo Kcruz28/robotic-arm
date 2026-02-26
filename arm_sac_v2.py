@@ -53,8 +53,8 @@ class RobotArmEnv(gym.Env):
         # ACTION: 6 joint deltas in [-1, 1]
         self.action_space = spaces.Box(low=-1, high=1, shape=(6,), dtype=np.float32)
 
-        # OBSERVATION: 20 values — joints(6) + block_pos(3) + gripper_pos(3) + gripper_ori(4) + rel_pos(3) + dist(1)
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(20,), dtype=np.float32)
+        # OBSERVATION: 22 values — joints(6) + block_pos(3) + tcp_pos(3) + tcp_ori(4) + rel_pos(3) + tcp_dist(1) + jaw4_dist(1) + jaw5_dist(1)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(22,), dtype=np.float32)
 
     def reset(self, seed=None, options=None):
         try:
@@ -120,24 +120,38 @@ class RobotArmEnv(gym.Env):
             return self._get_obs(fallback_pos=trash_pos), -50.0, True, False, {}
 
         try:
-            link_state = p.getLinkState(self.arm_id, 5, computeForwardKinematics=1, physicsClientId=self.client)
-            gripper_pos = link_state[0]
+            link_4_state = p.getLinkState(self.arm_id, 4, computeForwardKinematics=1, physicsClientId=self.client)
+            link_5_state = p.getLinkState(self.arm_id, 5, computeForwardKinematics=1, physicsClientId=self.client)
+            jaw_4_pos = np.array(link_4_state[0])
+            jaw_5_pos = np.array(link_5_state[0])
+            # True Tool Center Point between jaws
+            tcp_pos = (jaw_4_pos + jaw_5_pos) / 2.0
+            
+            # The orientation of the overall gripper can simply take from the base
+            tcp_ori = link_5_state[1]
         except p.error:
-            return self._get_obs(fallback_pos=trash_pos), 0.0, True, False, {}
-
-        dist = np.linalg.norm(np.array(gripper_pos) - np.array(trash_pos))
+            # Fallback
+            tcp_pos = np.array([0, 0, 0])
+            jaw_4_pos = np.array([0, 0, 0])
+            jaw_5_pos = np.array([0, 0, 0])
+            
+        dist = np.linalg.norm(tcp_pos - np.array(trash_pos))
+        
+        # --- Timer Penalty ---
+        # Sense of urgency: constant drain every timestep to force fast grabbing
+        reward = -0.5
 
         # --- Reward 1: Approach ---
         # Target the center of the block directly to enclose it
         target_pos = np.array(trash_pos)
-        real_dist = np.linalg.norm(np.array(gripper_pos) - target_pos)
-        reward = -real_dist * 5.0
+        real_dist = np.linalg.norm(tcp_pos - target_pos)
+        reward += -real_dist * 5.0
 
         # --- Reward 2: Crane approach & Centering ---
-        xy_dist = np.linalg.norm(np.array(gripper_pos[:2]) - np.array(trash_pos[:2]))
+        xy_dist = np.linalg.norm(tcp_pos[:2] - np.array(trash_pos[:2]))
         if xy_dist > 0.06:
             # Too far laterally → penalise being low to prevent sweeping
-            if gripper_pos[2] < 0.10:
+            if tcp_pos[2] < 0.10:
                 reward -= 10.0
         else:
             # Hovering above block → explicitly reward staying perfectly centered
@@ -166,8 +180,8 @@ class RobotArmEnv(gym.Env):
             # Pushing the block into the floor
             reward -= 15.0
             
-        if gripper_pos[2] < 0.01:
-            # Crashing the gripper into the floor
+        if tcp_pos[2] < 0.01:
+            # Crashing the true center into the floor
             reward -= 15.0
 
         # --- Penalty 2: Arm body hitting block (only fingers should touch) ---
@@ -211,24 +225,35 @@ class RobotArmEnv(gym.Env):
                 trash_pos = [0, 0, -1]
 
         try:
-            link_state = p.getLinkState(self.arm_id, 5, computeForwardKinematics=1, physicsClientId=self.client)
-            gripper_pos = link_state[0]
-            gripper_ori = link_state[1]
+            link_4_state = p.getLinkState(self.arm_id, 4, computeForwardKinematics=1, physicsClientId=self.client)
+            link_5_state = p.getLinkState(self.arm_id, 5, computeForwardKinematics=1, physicsClientId=self.client)
+            jaw_4_pos = np.array(link_4_state[0])
+            jaw_5_pos = np.array(link_5_state[0])
+            
+            tcp_pos = (jaw_4_pos + jaw_5_pos) / 2.0
+            tcp_ori = link_5_state[1]
         except p.error:
-            gripper_pos = [0, 0, 0]
-            gripper_ori = [0, 0, 0, 1]
+            tcp_pos = np.array([0, 0, 0])
+            tcp_ori = [0, 0, 0, 1]
+            jaw_4_pos = np.array([0, 0, 0])
+            jaw_5_pos = np.array([0, 0, 0])
 
-        rel_pos = np.array(trash_pos) - np.array(gripper_pos)
-        dist = np.linalg.norm(rel_pos)
+        rel_pos = np.array(trash_pos) - tcp_pos
+        tcp_dist = np.linalg.norm(rel_pos)
+        
+        jaw4_dist = np.linalg.norm(jaw_4_pos - np.array(trash_pos))
+        jaw5_dist = np.linalg.norm(jaw_5_pos - np.array(trash_pos))
 
-        # 6 + 3 + 3 + 4 + 3 + 1 = 20
+        # 6 + 3 + 3 + 4 + 3 + 1 + 1 + 1 = 22
         return np.array(
             joints +
             list(trash_pos) +
-            list(gripper_pos) +
-            list(gripper_ori) +
+            list(tcp_pos) +
+            list(tcp_ori) +
             list(rel_pos) +
-            [dist],
+            [tcp_dist] +
+            [jaw4_dist] +
+            [jaw5_dist],
             dtype=np.float32
         )
 
