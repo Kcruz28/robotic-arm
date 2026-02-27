@@ -143,11 +143,15 @@ class RobotArmEnv(gym.Env):
         real_dist = np.linalg.norm(tcp_pos - target_pos)
         reward -= real_dist * 15.0  # Heavy pain increases the further away it is
         
-        # --- 2. Hybrid Proximity Bonus ---
-        # If the invisible TCP is practically inside the block, reward it.
-        # This creates a local minimum EXACTLY where it can safely grab the block.
+        # --- 2. Hybrid Proximity Bonus (Removed to stop point farming) ---
+        # --- 3. Jaw Actuation Guidance ---
+        # If the invisible TCP is practically inside the block, Punish open jaws.
+        # This teaches it that once it arrives, it MUST snap its jaws shut.
+        gripper_joint = current_joints[5]
         if real_dist < 0.04:
-            reward += 5.0
+            # Gripper joint goes from 0 (closed) to 1 (open, mostly capped at 1.7)
+            # Punish keeping them open over the block.
+            reward -= gripper_joint * 10.0
         
         # --- 3. Safety Bounds ---
         if tcp_pos[2] < 0.00:
@@ -164,10 +168,8 @@ class RobotArmEnv(gym.Env):
                                             linkIndexA=5, physicsClientId=self.client) or ()
         gripped = len(contact_stationary) > 0 and len(contact_moving) > 0
 
-        # Optional: Prevent stuck jaws by mildly punishing tightly closed Jaws 
-        # when NOT actively gripping the block geometry
-        gripper_joint = current_joints[5]
-        if not gripped and gripper_joint < 0.2:
+        # Optional: Prevent stuck closed jaws when navigating far away
+        if not gripped and real_dist >= 0.04 and gripper_joint < 0.2:
             reward -= 2.0
 
         # (Removed all other dense positional checking inside the `step` function!)
