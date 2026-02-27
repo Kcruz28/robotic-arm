@@ -177,11 +177,11 @@ class RobotArmEnv(gym.Env):
             reward -= gripper_joint * 5.0
 
         # --- Penalty 1: Squishing the block & Smashing the floor ---
-        if trash_pos[2] < 0.015:
+        if trash_pos[2] < 0.005:
             # Pushing the block into the floor
             reward -= 15.0
             
-        if tcp_pos[2] < 0.01:
+        if tcp_pos[2] < 0.00:
             # Crashing the true center into the floor
             reward -= 15.0
 
