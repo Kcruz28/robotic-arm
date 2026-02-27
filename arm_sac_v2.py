@@ -141,22 +141,21 @@ class RobotArmEnv(gym.Env):
         # Sense of urgency: constant drain every timestep to force fast grabbing
         reward = -0.5
 
-        # --- Reward 1: Approach ---
+        # --- Reward 1: Approach (Strictly Negative) ---
         # Target the center of the block directly to enclose it
         target_pos = np.array(trash_pos)
         real_dist = np.linalg.norm(tcp_pos - target_pos)
-        reward += -real_dist * 5.0
+        reward -= real_dist * 10.0  # Pain increases the further away it is
 
-        # --- Reward 2: Crane approach & Centering ---
+        # --- Reward 2: Crane approach & Centering (Strictly Negative) ---
         xy_dist = np.linalg.norm(tcp_pos[:2] - np.array(trash_pos[:2]))
-        if xy_dist > 0.06:
-            # Too far laterally → penalise being low to prevent sweeping
+        if xy_dist > 0.04:
+            # Penalize heavily if the arm is not directly over the block (No positive reward for being centered)
+            reward -= xy_dist * 10.0
+            
+            # Additional penalty if it gets dangerously low while sweeping from afar
             if tcp_pos[2] < 0.10:
                 reward -= 10.0
-        else:
-            # Hovering above block → explicitly reward staying perfectly centered
-            xy_centering_reward = max(0, 0.06 - xy_dist)
-            reward += xy_centering_reward * 50.0
 
         # --- Reward 3: Grasp (both jaw faces must contact block) ---
         contact_stationary = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id,
@@ -168,12 +167,14 @@ class RobotArmEnv(gym.Env):
         if gripped:
             reward += 50.0  # Jackpot: block sandwiched between jaws
 
-        # --- Reward 4: Jaw Actuation ---
+        # --- Reward 4: Jaw Actuation (Strictly Negative) ---
         gripper_joint = current_joints[5]
         if dist > 0.05:
-            reward += gripper_joint * 5.0  # Encourage open jaws far away
+            # Penalize being closed when far away
+            reward -= (0.5 - gripper_joint) * 2.0
         elif dist < 0.04:
-            reward -= gripper_joint * 5.0  # Encourage closing jaws when super close
+            # Penalize being open when super close
+            reward -= gripper_joint * 5.0
 
         # --- Penalty 1: Squishing the block & Smashing the floor ---
         if trash_pos[2] < 0.015:
@@ -366,9 +367,9 @@ if __name__ == "__main__":
         help=(
             "Number of parallel PyBullet environments (default: 1).\n"
             "More envs = faster data collection = GPU stays fed.\n"
-            "Recommended for RTX 5090: --envs 8\n"
+            "Recommended for RTX 5090: Match your CPU logical processors (e.g., --envs 45).\n"
             "Each env runs in its own CPU process (SubprocVecEnv).\n"
-            "Example: --envs 8"
+            "Example: --envs 45"
         ),
     )
 
