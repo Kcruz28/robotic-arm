@@ -135,29 +135,40 @@ class RobotArmEnv(gym.Env):
             jaw_4_pos = np.array([0, 0, 0])
             jaw_5_pos = np.array([0, 0, 0])
             
-        dist = np.linalg.norm(tcp_pos - np.array(trash_pos))
+        # --- 1. Hybrid Existence & Approach Penalty ---
+        # The agent must understand "getting closer" reduces the pain
+        reward = -0.5
         
-        # --- 1. Sparse Existential Penalty ---
-        # The agent must figure out how to stop the pain as fast as possible.
-        reward = -1.0
+        target_pos = np.array(trash_pos)
+        real_dist = np.linalg.norm(tcp_pos - target_pos)
+        reward -= real_dist * 15.0  # Heavy pain increases the further away it is
         
-        # --- 2. Safety Bounds ---
+        # --- 2. Hybrid Proximity Bonus ---
+        # If the invisible TCP is practically inside the block, reward it.
+        # This creates a local minimum EXACTLY where it can safely grab the block.
+        if real_dist < 0.04:
+            reward += 5.0
+        
+        # --- 3. Safety Bounds ---
         if tcp_pos[2] < 0.00:
-            reward -= 10.0  # Mild penalty for crashing the jaws into the floor
+            reward -= 10.0  # Mild penalty for crashing the true center into the floor
             
-        # Optional: We keep the jaw actuation penalty strictly to prevent
-        # the agent from exploiting a single "stuck jaw" posture.
-        gripper_joint = current_joints[5]
-        if dist > 0.05:
-            # Jaws must be open when navigating
-            reward -= (0.5 - gripper_joint) * 2.0
-        
-        # --- 3. The Sparse Goal (Lift Jackpot) ---
+        if trash_pos[2] < 0.005:
+            # Pushing the block into the floor
+            reward -= 15.0
+            
+        # --- 4. Contact & Sparsity Lift Goal ---
         contact_stationary = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id,
                                                 linkIndexA=4, physicsClientId=self.client) or ()
         contact_moving = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id,
                                             linkIndexA=5, physicsClientId=self.client) or ()
         gripped = len(contact_stationary) > 0 and len(contact_moving) > 0
+
+        # Optional: Prevent stuck jaws by mildly punishing tightly closed Jaws 
+        # when NOT actively gripping the block geometry
+        gripper_joint = current_joints[5]
+        if not gripped and gripper_joint < 0.2:
+            reward -= 2.0
 
         # (Removed all other dense positional checking inside the `step` function!)
 
