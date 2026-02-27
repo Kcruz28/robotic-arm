@@ -428,7 +428,7 @@ if __name__ == "__main__":
         print(f"\n{'='*55}")
         print(f"  Mode         : TRAIN")
         print(f"  RL Algorithm : SAC + gSDE")
-        print(f"  Device       : {DEVICE.upper()}  ◄ THIS IS WHERE YOUR MODEL TRAINS")
+        print(f"  Device       : {DEVICE.upper()} ")
         print(f"  Steps        : {training_steps:,}")
         print(f"  Parallel envs: {n_envs}")
         print(f"  Batch size   : {scaled_batch}")
