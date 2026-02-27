@@ -79,9 +79,10 @@ class RobotArmEnv(gym.Env):
             self.trash_id = p.loadURDF("cube_small.urdf", basePosition=[rand_x, rand_y, 0.02],
                                        globalScaling=0.7, physicsClientId=self.client)
             p.changeVisualShape(self.trash_id, -1, rgbaColor=[1, 0, 0, 1], physicsClientId=self.client)
-            # High friction so the block doesn't slip once gripped
+            # High friction symmetrically applied to stop the block from slipping like a watermelon seed
             p.changeDynamics(self.trash_id, -1, lateralFriction=2.0, physicsClientId=self.client)
-            p.changeDynamics(self.arm_id, 5, lateralFriction=2.0, physicsClientId=self.client)
+            p.changeDynamics(self.arm_id, 4, lateralFriction=2.0, physicsClientId=self.client) # Jaw 1
+            p.changeDynamics(self.arm_id, 5, lateralFriction=2.0, physicsClientId=self.client) # Jaw 2
         except p.error:
             pass
 
@@ -182,14 +183,18 @@ class RobotArmEnv(gym.Env):
         # --- Penalty 3: Jittery/high-effort movement ---
         reward -= np.sum(np.square(action)) * 0.001
 
-        # --- Reward 5: Lift ---
+        # --- Reward 5: Continuous Lift Validation & Jackpot ---
         trash_z = trash_pos[2]
-        if trash_z > 0.05 and gripped:
-            reward += (trash_z - 0.02) * 1000
+        
+        # Give massive continuous points for EVERY MILLIMETER it successfully
+        # lifts the block off the physical floor plane (Z > 0.02m)
+        if trash_z > 0.02 and gripped:
+            reward += (trash_z - 0.02) * 2000.0
 
         terminated = False
-        if trash_z > 0.1 and gripped:
-            reward += 500.0
+        # Lowered jackpot threshold from 0.10m (impossible jump) to 0.05m
+        if trash_z > 0.05 and gripped:
+            reward += 1000.0
             terminated = True
             if self.render_mode:
                 print("TARGET GRABBED AND LIFTED!")
