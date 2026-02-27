@@ -144,14 +144,12 @@ class RobotArmEnv(gym.Env):
         reward -= real_dist * 15.0  # Heavy pain increases the further away it is
         
         # --- 2. Hybrid Proximity Bonus (Removed to stop point farming) ---
-        # --- 3. Jaw Actuation Guidance ---
-        # If the invisible TCP is practically inside the block, Punish open jaws.
-        # This teaches it that once it arrives, it MUST snap its jaws shut.
+        # --- 3. Jaw Actuation Guidance (Gradient penalty) ---
+        # Instead of a hard boundary that scares the AI, the penalty for open jaws
+        # slowly ramps up the closer it gets to the block.
         gripper_joint = current_joints[5]
-        if real_dist < 0.04:
-            # Gripper joint goes from 0 (closed) to 1 (open, mostly capped at 1.7)
-            # Punish keeping them open over the block.
-            reward -= gripper_joint * 10.0
+        # penalty strength inversely proportional to distance (maxes out around -10 near 0 dist)
+        reward -= (gripper_joint * 0.1) / (real_dist + 0.01)
         
         # --- 3. Safety Bounds ---
         if tcp_pos[2] < 0.00:
