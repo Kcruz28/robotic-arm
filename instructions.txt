@@ -20,3 +20,9 @@ On the 5090 machine, run:
 python arm_sac_v1.py train --save so101_SAC_v1 --steps 1000000 --envs 8
 
 python arm_sac_v1.py train --model so101_SAC_v1 --save so101_SAC_v2 --steps 1000000 --envs 8
+
+
+python arm_sac_v2.py train --model so101_SAC_v2_3 --save so101_SAC_v3 --steps 500000 --envs 30
+
+
+python arm_sac_v1.py train --save so101_SAC_v3 --steps 5000000 --envs 50
