@@ -140,7 +140,10 @@ class RobotArmEnv(gym.Env):
         # The agent must understand "getting closer" reduces the pain
         reward = -0.5
         
+        # We target slightly BELOW the center of the block, so the jaws must fully submerge
         target_pos = np.array(trash_pos)
+        target_pos[2] -= 0.01
+        
         real_dist = np.linalg.norm(tcp_pos - target_pos)
         reward -= real_dist * 15.0  # Heavy pain increases the further away it is
         
@@ -185,15 +188,18 @@ class RobotArmEnv(gym.Env):
 
         # --- Reward 5: Continuous Lift Validation & Jackpot ---
         trash_z = trash_pos[2]
+        xy_dist = np.linalg.norm(tcp_pos[:2] - np.array(trash_pos[:2]))
         
         # Give massive continuous points for EVERY MILLIMETER it successfully
-        # lifts the block off the physical floor plane (Z > 0.02m)
-        if trash_z > 0.02 and gripped:
+        # lifts the block off the physical floor plane (Z > 0.02m).
+        # STRICT REQUIREMENT: The gripper MUST be perfectly centered (xy_dist < 0.02)
+        # to prevent it from cheating by lightly clipping the edge of the block.
+        if trash_z > 0.02 and gripped and xy_dist < 0.02:
             reward += (trash_z - 0.02) * 2000.0
 
         terminated = False
         # Lowered jackpot threshold from 0.10m (impossible jump) to 0.05m
-        if trash_z > 0.05 and gripped:
+        if trash_z > 0.05 and gripped and xy_dist < 0.02:
             reward += 1000.0
             terminated = True
             if self.render_mode:
