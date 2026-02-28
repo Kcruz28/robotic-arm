@@ -53,7 +53,7 @@ class RobotArmEnv(gym.Env):
         # ACTION: 6 joint deltas in [-1, 1]
         self.action_space = spaces.Box(low=-1, high=1, shape=(6,), dtype=np.float32)
 
-        # OBSERVATION: 22 values — joints(6) + block_pos(3) + tcp_pos(3) + tcp_ori(4) + rel_pos(3) + tcp_dist(1) + jaw4_dist(1) + jaw5_dist(1)
+        # OBSERVATION: 22 values — joints(6) + block_pos(3) + grasp_center(3) + finger_axis(3) + rel_pos(3) + grasp_dist(1) + gripper_width(1) + jaw4_dist(1) + jaw5_dist(1)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(22,), dtype=np.float32)
 
     def reset(self, seed=None, options=None):
@@ -95,10 +95,46 @@ class RobotArmEnv(gym.Env):
         self.step_counter = 0
         return self._get_obs(), {}
 
+    def _compute_grasp_geometry(self):
+        """
+        Compute the actual grasp center point, finger axis, and gripper width
+        using the URDF link frame (not COM) + the known finger extension direction.
+
+        Returns:
+            grasp_center: np.array(3) — world position where the fingers actually close
+            finger_axis:  np.array(3) — unit vector in world coords pointing along the fingers
+            rot:          np.array(3,3) — gripper rotation matrix (columns = local axes in world)
+            jaw_4_pos:    np.array(3) — gripper COM world position (for obs compatibility)
+            jaw_5_pos:    np.array(3) — jaw COM world position
+            gripper_width: float — distance between the two jaw COMs (proxy for opening width)
+        """
+        link_4_state = p.getLinkState(self.arm_id, 4, computeForwardKinematics=1, physicsClientId=self.client)
+        link_5_state = p.getLinkState(self.arm_id, 5, computeForwardKinematics=1, physicsClientId=self.client)
+
+        # URDF link frame position (NOT the COM, which is offset into the body)
+        gripper_frame_pos = np.array(link_4_state[4])   # worldLinkFramePosition
+        gripper_frame_ori = link_4_state[5]              # worldLinkFrameOrientation
+
+        rot = np.array(p.getMatrixFromQuaternion(gripper_frame_ori)).reshape(3, 3)
+
+        # The fingers extend along the gripper's LOCAL -Z axis.
+        # (Jaw joint origin is at z=-0.023 in gripper frame; jaw COM is ~5cm below gripper frame.)
+        finger_axis = -rot[:, 2]   # gripper -Z in world
+
+        # Project 4.5 cm along finger axis from the gripper frame to reach the
+        # point where the two fingers actually close around an object.
+        grasp_center = gripper_frame_pos + finger_axis * 0.045
+
+        # COM positions (still useful for per-jaw distance in obs)
+        jaw_4_pos = np.array(link_4_state[0])
+        jaw_5_pos = np.array(link_5_state[0])
+        gripper_width = float(np.linalg.norm(jaw_4_pos - jaw_5_pos))
+
+        return grasp_center, finger_axis, rot, jaw_4_pos, jaw_5_pos, gripper_width
+
     def step(self, action):
         self.step_counter += 1
 
-        # FIX: physicsClientId added — was missing in original, caused multi-env crashes
         current_joints = [p.getJointState(self.arm_id, i, physicsClientId=self.client)[0] for i in range(6)]
         new_joints = np.array(current_joints) + (action * 0.1)
 
@@ -107,11 +143,13 @@ class RobotArmEnv(gym.Env):
                                     targetPosition=new_joints[i], force=50.0,
                                     physicsClientId=self.client)
 
-        p.stepSimulation(physicsClientId=self.client)
+        # 4 physics sub-steps per action for more stable contacts
+        for _ in range(4):
+            p.stepSimulation(physicsClientId=self.client)
         if self.render_mode:
-            time.sleep(1. / 240.)
+            time.sleep(1. / 60.)
 
-        # --- Safety checks ---
+        # --- Get block position ---
         try:
             trash_pos, _ = p.getBasePositionAndOrientation(self.trash_id, physicsClientId=self.client)
         except p.error:
@@ -120,92 +158,110 @@ class RobotArmEnv(gym.Env):
         if trash_pos[2] < -0.1:
             return self._get_obs(fallback_pos=trash_pos), -50.0, True, False, {}
 
+        block_pos = np.array(trash_pos)
+
+        # --- Compute accurate grasp geometry ---
         try:
-            link_4_state = p.getLinkState(self.arm_id, 4, computeForwardKinematics=1, physicsClientId=self.client)
-            link_5_state = p.getLinkState(self.arm_id, 5, computeForwardKinematics=1, physicsClientId=self.client)
-            jaw_4_pos = np.array(link_4_state[0])
-            jaw_5_pos = np.array(link_5_state[0])
-            # True Tool Center Point between jaws
-            tcp_pos = (jaw_4_pos + jaw_5_pos) / 2.0
-            
-            # The orientation of the overall gripper can simply take from the base
-            tcp_ori = link_5_state[1]
+            grasp_center, finger_axis, rot, jaw_4_pos, jaw_5_pos, gripper_width = self._compute_grasp_geometry()
         except p.error:
-            # Fallback
-            tcp_pos = np.array([0, 0, 0])
+            grasp_center = np.array([0, 0, 0])
+            finger_axis = np.array([0, 0, -1])
+            rot = np.eye(3)
             jaw_4_pos = np.array([0, 0, 0])
             jaw_5_pos = np.array([0, 0, 0])
-            
-        # --- 1. Hybrid Existence & Approach Penalty ---
-        # The agent must understand "getting closer" reduces the pain
-        reward = -0.5
-        
-        # We target slightly BELOW the center of the block, so the jaws must fully submerge
-        target_pos = np.array(trash_pos)
-        target_pos[2] -= 0.01
-        
-        real_dist = np.linalg.norm(tcp_pos - target_pos)
-        reward -= real_dist * 15.0  # Heavy pain increases the further away it is
-        
-        # --- 2. Hybrid Proximity Bonus (Removed to stop point farming) ---
-        # --- 3. Jaw Actuation Guidance (Gradient penalty) ---
-        # Instead of a hard boundary that scares the AI, the penalty for open jaws
-        # slowly ramps up the closer it gets to the block.
-        gripper_joint = current_joints[5]
-        # penalty strength inversely proportional to distance (maxes out around -10 near 0 dist)
-        reward -= (gripper_joint * 0.1) / (real_dist + 0.01)
-        
-        # --- 3. Safety Bounds ---
-        if tcp_pos[2] < 0.00:
-            reward -= 10.0  # Mild penalty for crashing the true center into the floor
-            
-        if trash_pos[2] < 0.005:
-            # Pushing the block into the floor
-            reward -= 15.0
-            
-        # --- 4. Contact & Sparsity Lift Goal ---
-        contact_stationary = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id,
-                                                linkIndexA=4, physicsClientId=self.client) or ()
-        contact_moving = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id,
-                                            linkIndexA=5, physicsClientId=self.client) or ()
-        gripped = len(contact_stationary) > 0 and len(contact_moving) > 0
+            gripper_width = 0.0
 
-        # Optional: Prevent stuck closed jaws when navigating far away
-        if not gripped and real_dist >= 0.04 and gripper_joint < 0.2:
-            reward -= 2.0
+        gripper_joint = current_joints[5]  # jaw opening (0 = closed, positive = open)
 
-        # (Removed all other dense positional checking inside the `step` function!)
+        # ===================== REWARD =====================
+        reward = 0.0
 
-        # --- Penalty 2: Arm body hitting block (only fingers should touch) ---
+        # --- 1. ORIENTATION: gripper fingers must point DOWNWARD ---
+        # rot[:, 2] is the gripper's local Z in world.  When that Z points UP
+        # (world +Z), the fingers (-Z) point DOWN.  orientation_score → +1 ideal.
+        orientation_score = rot[2, 2]
+        reward += orientation_score * 3.0
+
+        # --- 2. XY ALIGNMENT: get directly above the block first ---
+        xy_dist = np.linalg.norm(grasp_center[:2] - block_pos[:2])
+        reward -= xy_dist * 15.0
+
+        # --- 3. Z APPROACH: descend only when horizontally aligned ---
+        target_grasp_z = block_pos[2]          # grasp center should reach block center height
+        z_error = abs(grasp_center[2] - target_grasp_z)
+
+        if xy_dist < 0.04:
+            # Close in XY → reward for correct height
+            reward -= z_error * 15.0
+            reward += 2.0                       # bonus for being well-aligned
+        else:
+            # Not yet aligned in XY → stay at safe approach height
+            safe_z = block_pos[2] + 0.08
+            if grasp_center[2] < safe_z:
+                reward -= (safe_z - grasp_center[2]) * 10.0
+
+        # Overall 3D distance signal (softer, to avoid dominating the phases)
+        full_dist = np.linalg.norm(grasp_center - block_pos)
+        reward -= full_dist * 5.0
+
+        # --- 4. JAW TIMING: open during approach, close when near ---
+        close_threshold = 0.04
+        if full_dist > close_threshold:
+            # Far away ⇒ keep jaws OPEN
+            target_jaw = 0.5
+            jaw_error = abs(gripper_joint - target_jaw)
+            reward -= jaw_error * 1.0
+        else:
+            # Near the block ⇒ close the jaws
+            reward -= gripper_joint * 3.0       # penalty proportional to openness
+            if gripper_joint < 0.15:
+                reward += 2.0                   # bonus for actually closing
+
+        # --- 5. CONTACT REWARDS ---
+        contact_gripper = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id,
+                                             linkIndexA=4, physicsClientId=self.client) or ()
+        contact_jaw     = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id,
+                                             linkIndexA=5, physicsClientId=self.client) or ()
+        gripped = len(contact_gripper) > 0 and len(contact_jaw) > 0
+        single_contact = len(contact_gripper) > 0 or len(contact_jaw) > 0
+
+        if single_contact:
+            reward += 3.0
+        if gripped:
+            reward += 10.0
+
+        # --- 6. BAD BODY CONTACT: only fingers should touch ---
         for link_idx in range(4):
-            bad_contact = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id,
-                                             linkIndexA=link_idx, physicsClientId=self.client) or ()
-            if len(bad_contact) > 0:
+            bad = p.getContactPoints(bodyA=self.arm_id, bodyB=self.trash_id,
+                                     linkIndexA=link_idx, physicsClientId=self.client) or ()
+            if len(bad) > 0:
                 reward -= 10.0
 
-        # --- Penalty 3: Jittery/high-effort movement ---
-        reward -= np.sum(np.square(action)) * 0.001
+        # --- 7. SAFETY ---
+        if grasp_center[2] < -0.01:
+            reward -= 10.0
+        if trash_pos[2] < 0.005:
+            reward -= 15.0
 
-        # --- Reward 5: Continuous Lift Validation & Jackpot ---
+        # --- 8. EFFORT ---
+        reward -= np.sum(np.square(action)) * 0.003
+
+        # --- 9. SMALL TIME PENALTY (encourages efficiency) ---
+        reward -= 0.01
+
+        # --- 10. LIFT REWARD  ---
         trash_z = trash_pos[2]
-        xy_dist = np.linalg.norm(tcp_pos[:2] - np.array(trash_pos[:2]))
-        
-        # Give massive continuous points for EVERY MILLIMETER it successfully
-        # lifts the block off the physical floor plane (Z > 0.02m).
-        # STRICT REQUIREMENT: The gripper MUST be perfectly centered (xy_dist < 0.02)
-        # to prevent it from cheating by lightly clipping the edge of the block.
-        if trash_z > 0.02 and gripped and xy_dist < 0.02:
-            reward += (trash_z - 0.02) * 2000.0
+        if trash_z > 0.025 and gripped:
+            reward += (trash_z - 0.025) * 3000.0
 
         terminated = False
-        # Lowered jackpot threshold from 0.10m (impossible jump) to 0.05m
-        if trash_z > 0.05 and gripped and xy_dist < 0.02:
-            reward += 1000.0
+        if trash_z > 0.05 and gripped:
+            reward += 500.0
             terminated = True
             if self.render_mode:
                 print("TARGET GRABBED AND LIFTED!")
 
-        truncated = self.step_counter > 800
+        truncated = self.step_counter > 1000
 
         return self._get_obs(), reward, terminated, truncated, {}
 
@@ -224,33 +280,29 @@ class RobotArmEnv(gym.Env):
                 trash_pos = [0, 0, -1]
 
         try:
-            link_4_state = p.getLinkState(self.arm_id, 4, computeForwardKinematics=1, physicsClientId=self.client)
-            link_5_state = p.getLinkState(self.arm_id, 5, computeForwardKinematics=1, physicsClientId=self.client)
-            jaw_4_pos = np.array(link_4_state[0])
-            jaw_5_pos = np.array(link_5_state[0])
-            
-            tcp_pos = (jaw_4_pos + jaw_5_pos) / 2.0
-            tcp_ori = link_5_state[1]
+            grasp_center, finger_axis, _, jaw_4_pos, jaw_5_pos, gripper_width = self._compute_grasp_geometry()
         except p.error:
-            tcp_pos = np.array([0, 0, 0])
-            tcp_ori = [0, 0, 0, 1]
+            grasp_center = np.array([0, 0, 0])
+            finger_axis = np.array([0, 0, -1])
             jaw_4_pos = np.array([0, 0, 0])
             jaw_5_pos = np.array([0, 0, 0])
+            gripper_width = 0.0
 
-        rel_pos = np.array(trash_pos) - tcp_pos
-        tcp_dist = np.linalg.norm(rel_pos)
-        
+        rel_pos = np.array(trash_pos) - grasp_center
+        grasp_dist = np.linalg.norm(rel_pos)
+
         jaw4_dist = np.linalg.norm(jaw_4_pos - np.array(trash_pos))
         jaw5_dist = np.linalg.norm(jaw_5_pos - np.array(trash_pos))
 
-        # 6 + 3 + 3 + 4 + 3 + 1 + 1 + 1 = 22
+        # 6 + 3 + 3 + 3 + 3 + 1 + 1 + 1 + 1 = 22
         return np.array(
             joints +
             list(trash_pos) +
-            list(tcp_pos) +
-            list(tcp_ori) +
+            list(grasp_center) +
+            list(finger_axis) +
             list(rel_pos) +
-            [tcp_dist] +
+            [grasp_dist] +
+            [gripper_width] +
             [jaw4_dist] +
             [jaw5_dist],
             dtype=np.float32
