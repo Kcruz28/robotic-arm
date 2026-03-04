@@ -69,7 +69,8 @@ class RobotArmEnv(gym.Env):
         p.setGravity(0, 0, -9.8, physicsClientId=self.client)
         p.loadURDF("plane.urdf", physicsClientId=self.client)
 
-        urdf_path = os.path.join(os.path.dirname(__file__), "so_arm_description", "urdf", "so101_new_calib.urdf")
+        # urdf_path = os.path.join(os.path.dirname(__file__), "so_arm_description", "urdf", "so101_new_calib.urdf")
+        urdf_path = os.path.join(os.path.dirname(__file__), "sheesh.urdf")
         self.arm_id = p.loadURDF(urdf_path, useFixedBase=True)
 
         rand_x = np.random.uniform(0.28, 0.32)
@@ -187,7 +188,8 @@ class RobotArmEnv(gym.Env):
         reward -= xy_dist * 15.0
 
         # --- 3. Z APPROACH: descend only when horizontally aligned ---
-        target_grasp_z = block_pos[2]          # grasp center should reach block center height
+        target_grasp_z = block_pos[2] - 0.015  # plunge TCP deep inside/below the block
+
         z_error = abs(grasp_center[2] - target_grasp_z)
 
         if xy_dist < 0.04:
@@ -205,10 +207,10 @@ class RobotArmEnv(gym.Env):
         reward -= full_dist * 5.0
 
         # --- 4. JAW TIMING: open during approach, close when near ---
-        close_threshold = 0.04
+        close_threshold = 0.02 # only snap shut when fully swallowing the block!
         if full_dist > close_threshold:
-            # Far away ⇒ keep jaws OPEN
-            target_jaw = 0.5
+            # Far away ⇒ keep jaws WIDE OPEN like a pelican so it doesn't clip the block
+            target_jaw = 1.2
             jaw_error = abs(gripper_joint - target_jaw)
             reward -= jaw_error * 1.0
         else:
@@ -340,10 +342,10 @@ if __name__ == "__main__":
         print(f"  VRAM: {vram_gb:.1f} GB")
         print(f"  CUDA Version: {torch.version.cuda}")
     elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
-        DEVICE = "mps"
+        DEVICE = "cpu"
         print("✓ Apple MPS GPU DETECTED (M1/M2/M3/M4)")
-        print("  Using Metal GPU acceleration.")
-        print("  Note: if you see MPS tensor errors, set DEVICE='cpu' manually.")
+        print("  WARNING: Stable-Baselines3 SAC has tensor bugs with MPS.")
+        print("  Forcing DEVICE='cpu' to guarantee compatibility.")
     else:
         DEVICE = "cpu"
         print("✗ No GPU detected. Training on CPU.")

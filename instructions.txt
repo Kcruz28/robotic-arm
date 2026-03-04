@@ -26,3 +26,7 @@ python arm_sac_v2.py train --model so101_SAC_v2_3 --save so101_SAC_v3 --steps 50
 
 
 python arm_sac_v1.py train --save so101_SAC_v3 --steps 5000000 --envs 50
+
+
+
+tensorboard --logdir ./sac_tensorboard/ --port 6006
